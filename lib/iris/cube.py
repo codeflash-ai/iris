@@ -859,12 +859,22 @@ class CubeAttrsDict(MutableMapping):
             # N.B. enforce deep copying, consistent with general Iris usage.
             if hasattr(combined, "globals") and hasattr(combined, "locals"):
                 # Copy a mapping with globals/locals, like another 'CubeAttrsDict'
-                self.globals.update(deepcopy(combined.globals))
-                self.locals.update(deepcopy(combined.locals))
+                # N.B. enforce deep copying, consistent with general Iris usage.
+                cglobals = getattr(combined, "globals")
+                clocals = getattr(combined, "locals")
+                globals_copier = getattr(cglobals, "copy", None)
+                locals_copier = getattr(clocals, "copy", None)
+
+                if callable(globals_copier) and callable(locals_copier):
+                    self.globals.update(cglobals.copy())
+                    self.locals.update(clocals.copy())
+                else:
+                    self.globals.update(deepcopy(cglobals))
+                    self.locals.update(deepcopy(clocals))
             else:
                 # Treat any arbitrary single input value as a mapping (dict), and
                 # update from it.
-                self.update(dict(deepcopy(combined)))
+                self.update(dict(combined))
 
     #
     # Ensure that the stored local/global dictionaries are "LimitedAttributeDicts".
@@ -936,7 +946,18 @@ class CubeAttrsDict(MutableMapping):
         Implemented with deep copying, consistent with general Iris usage.
 
         """
-        return CubeAttrsDict(self)
+        return CubeAttrsDict(
+            locals=(
+                self.locals.copy()
+                if hasattr(self.locals, "copy")
+                else deepcopy(self.locals)
+            ),
+            globals=(
+                self.globals.copy()
+                if hasattr(self.globals, "copy")
+                else deepcopy(self.globals)
+            ),
+        )
 
     def update(self, *args, **kwargs):
         """Update by adding items from a mapping arg, or keyword-values.
