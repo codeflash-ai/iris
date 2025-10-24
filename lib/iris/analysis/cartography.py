@@ -170,8 +170,18 @@ def rotate_pole(lons, lats, pole_lon, pole_lat):
         rotated_lons, rotated_lats = rotate_pole(lons, lats, pole_lon, pole_lat)
 
     """
+    # Cache RotatedGeodetic projections to avoid repeated instantiation
+    if not hasattr(rotate_pole, "_proj_cache"):
+        rotate_pole._proj_cache = {}
+
+    cache_key = (pole_lon, pole_lat)
+    if cache_key not in rotate_pole._proj_cache:
+        rotate_pole._proj_cache[cache_key] = ccrs.RotatedGeodetic(
+            pole_longitude=pole_lon, pole_latitude=pole_lat
+        )
+
     src_proj = ccrs.Geodetic()
-    target_proj = ccrs.RotatedGeodetic(pole_longitude=pole_lon, pole_latitude=pole_lat)
+    target_proj = rotate_pole._proj_cache[cache_key]
     res = target_proj.transform_points(x=lons, y=lats, src_crs=src_proj)
     rotated_lon = res[..., 0]
     rotated_lat = res[..., 1]
