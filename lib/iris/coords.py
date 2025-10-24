@@ -2794,18 +2794,32 @@ class DimCoord(Coord):
         #: Whether the coordinate wraps by ``coord.units.modulus``.
         self.circular = circular
 
-    def __deepcopy__(self, memo):  # numpydoc ignore=SS02
+    def __deepcopy__(self, memo):
         """coord.__deepcopy__() -> Deep copy of coordinate.
 
         Used if copy.deepcopy is called on a coordinate.
 
         """
-        new_coord = copy.deepcopy(super(), memo)
+        # Avoid use of the full copy.deepcopy on self's MRO by copying the actual object directly
+        cls = self.__class__
+        # __new__ avoids unneeded __init__ code
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        # Use the object's __dict__ for a fast, direct deep copy
+        # Copy __dict__ shallowly then copy values deeply
+        result_dict = result.__dict__
+        self_dict = self.__dict__
+
+        # Fast fused-loop for copying each item. Assign directly to __dict__.
+        for k, v in self_dict.items():
+            result_dict[k] = copy.deepcopy(v, memo)
+
         # Ensure points and bounds arrays are read-only.
-        new_coord._values_dm.data.flags.writeable = False
-        if new_coord._bounds_dm is not None:
-            new_coord._bounds_dm.data.flags.writeable = False
-        return new_coord
+        # The following logic is identical to the original, just with new variable names.
+        result._values_dm.data.flags.writeable = False
+        if result._bounds_dm is not None:
+            result._bounds_dm.data.flags.writeable = False
+        return result
 
     @property
     def circular(self):
