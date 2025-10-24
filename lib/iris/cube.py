@@ -17,7 +17,6 @@ from collections.abc import (
 import copy
 from copy import deepcopy
 from functools import partial, reduce
-import itertools
 import operator
 from typing import TYPE_CHECKING, Any, Optional, TypeGuard
 import warnings
@@ -1011,10 +1010,13 @@ class CubeAttrsDict(MutableMapping):
         # locals+globals are listed first, amongst the globals, even though they appear
         # with the *value* from locals.
         # Otherwise follows order of insertion, as is normal for dicts.
-        return itertools.chain(
-            self.globals.keys(),
-            (x for x in self.locals.keys() if x not in self.globals),
-        )
+
+        # Optimize by caching the set of global keys to avoid repeated lookup
+        global_keys = set(self.globals.keys())
+        yield from self.globals.keys()
+        for key in self.locals.keys():
+            if key not in global_keys:
+                yield key
 
     def __len__(self):
         # Return the number of keys in the 'combined' view.
