@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1940,53 +1941,46 @@ class Cube(CFVariableMixin):
         tuple:
              A tuple of the data dimensions relevant to the given coordinate.
         """
+        # This implementation has been rewritten to avoid creating large intermediate dicts on every call
+        # and to short-circuit upon finding a match (for runtime efficiency).
+
         name_provided = False
         if isinstance(coord, str):
-            # Forced to look-up the coordinate if we only have the name.
             coord = self.coord(coord)
             name_provided = True
 
         coord_id = id(coord)
 
-        # Dimension of dimension coordinate by object id
-        dims_by_id: dict[int, tuple[int, ...]] = {
-            id(c): (d,) for c, d in self._dim_coords_and_dims
-        }
-        # Check for id match - faster than equality check
-        match = dims_by_id.get(coord_id)
+        # Try matching in dimension coordinates by object identity
+        for c, d in self._dim_coords_and_dims:
+            if id(c) == coord_id:
+                return (d,)
 
-        if match is None:
-            # Dimension/s of auxiliary coordinate by object id
-            aux_dims_by_id = {id(c): d for c, d in self._aux_coords_and_dims}
-            # Check for id match - faster than equality
-            match = aux_dims_by_id.get(coord_id)
-            if match is None:
-                dims_by_id.update(aux_dims_by_id)
+        # Try matching in auxiliary coordinates by object identity
+        for c, d in self._aux_coords_and_dims:
+            if id(c) == coord_id:
+                return d
 
-        # Search derived aux coordinates
-        if match is None:
-            target_metadata = coord.metadata
+        # Try matching in factories by metadata
+        target_metadata = getattr(coord, "metadata", None)
+        if target_metadata is not None:
+            for factory in self._aux_factories:
+                if factory.metadata == target_metadata:
+                    return factory.derived_dims(self.coord_dims)
 
-            def matcher(factory):
-                return factory.metadata == target_metadata
+        # If not provided by name, fallback to result of coordinate lookup and repeat direct id match
+        if not name_provided:
+            # coord will be the one returned by self.coord(coord)
+            lookup_coord = self.coord(coord)
+            lookup_id = id(lookup_coord)
+            for c, d in self._dim_coords_and_dims:
+                if id(c) == lookup_id:
+                    return (d,)
+            for c, d in self._aux_coords_and_dims:
+                if id(c) == lookup_id:
+                    return d
 
-            factories = filter(matcher, self._aux_factories)
-            matches = [factory.derived_dims(self.coord_dims) for factory in factories]
-            if matches:
-                match = matches[0]
-
-        if match is None and not name_provided:
-            # We may have an equivalent coordinate but not the actual
-            # cube coordinate instance - so forced to perform coordinate
-            # lookup to attempt to retrieve it
-            coord = self.coord(coord)
-            # Check for id match - faster than equality
-            match = dims_by_id.get(id(coord))
-
-        if match is None:
-            raise iris.exceptions.CoordinateNotFoundError(coord.name())
-
-        return match
+        raise iris.exceptions.CoordinateNotFoundError(coord.name())
 
     def cell_measure_dims(self, cell_measure: str | CellMeasure) -> tuple[int, ...]:
         """Return a tuple of the data dimensions relevant to the given CellMeasure.
@@ -2494,12 +2488,22 @@ class Cube(CFVariableMixin):
 
     def _any_meshcoord(self) -> MeshCoord | None:
         """Return a MeshCoord if there are any, else None."""
-        mesh_coords = self.coords(mesh_coords=True)
-        if mesh_coords:
-            result = mesh_coords[0]
-        else:
-            result = None
-        return result  # type: ignore[return-value]
+        # Optimization: avoid unnecessary list allocations in self.coords(mesh_coords=True)
+        # Only iterate until first mesh coordinate is found.
+        for dim_coord, _ in self._dim_coords_and_dims:
+            if hasattr(dim_coord, "mesh"):
+                return dim_coord  # type: ignore[return-value]
+        for aux_coord, _ in self._aux_coords_and_dims:
+            if hasattr(aux_coord, "mesh"):
+                return aux_coord  # type: ignore[return-value]
+        for factory in self._aux_factories:
+            # Use factory-produced coordinate if mesh is present
+            candidate = getattr(factory, "make_coord", None)
+            if candidate is not None:
+                c = factory.make_coord(self.coord_dims)
+                if hasattr(c, "mesh"):
+                    return c  # type: ignore[return-value]
+        return None
 
     @property
     def mesh(self) -> iris.mesh.MeshXY | None:
@@ -2549,7 +2553,7 @@ class Cube(CFVariableMixin):
         return result
 
     def mesh_dim(self) -> int | None:
-        r"""Return the cube dimension of the mesh.
+        """Return the cube dimension of the mesh.
 
         Return the cube dimension of the mesh, if the cube has any
         :class:`~iris.mesh.MeshCoord`,
