@@ -8,6 +8,7 @@ from abc import ABCMeta, abstractmethod
 from collections import namedtuple
 from collections.abc import Container
 import copy
+import functools
 from functools import lru_cache
 from itertools import zip_longest
 import operator
@@ -724,10 +725,6 @@ class _DimensionalMetadata(CFVariableMixin, metaclass=ABCMeta):
 
     def convert_units(self, unit):
         """Change the units, converting the values of the metadata."""
-        # If the coord has units convert the values in points (and bounds if
-        # present).
-        # Note: this method includes bounds handling code, but it only runs
-        # within Coord type instances, as only these allow bounds to be set.
         if self.units.is_unknown():
             raise iris.exceptions.UnitConversionError(
                 "Cannot convert from unknown units. "
@@ -736,30 +733,38 @@ class _DimensionalMetadata(CFVariableMixin, metaclass=ABCMeta):
 
         # Set up a delayed conversion for use if either values or bounds (if
         # present) are lazy.
-        # Make fixed copies of old + new units for a delayed conversion.
         old_unit = self.units
         new_unit = unit
 
-        # Define a delayed conversion operation (i.e. a callback).
-        def pointwise_convert(values):
-            return old_unit.convert(values, new_unit)
-
         if self._has_lazy_values():
+            pointwise_convert = functools.partial(
+                self._do_pointwise_unit_convert, old_unit=old_unit, new_unit=new_unit
+            )
             new_values = _lazy.lazy_elementwise(self._lazy_values(), pointwise_convert)
         else:
-            new_values = self.units.convert(self._values, unit)
+            new_values = old_unit.convert(self._values, new_unit)
         self._values = new_values
+
         if self.has_bounds():
+            bounds = self.bounds
             if self.has_lazy_bounds():
+                pointwise_convert = functools.partial(
+                    self._do_pointwise_unit_convert,
+                    old_unit=old_unit,
+                    new_unit=new_unit,
+                )
                 new_bounds = _lazy.lazy_elementwise(
                     self.lazy_bounds(), pointwise_convert
                 )
             else:
-                new_bounds = self.units.convert(self.bounds, unit)
+                new_bounds = old_unit.convert(bounds, new_unit)
             self.bounds = new_bounds
-        for key in "actual_range", "valid_max", "valid_min", "valid_range":
-            if key in self.attributes:
-                self.attributes[key] = self.units.convert(self.attributes[key], unit)
+
+        # Optimize repeated attribute access and reduce per-loop lookups
+        attributes = self.attributes
+        for key in ("actual_range", "valid_max", "valid_min", "valid_range"):
+            if key in attributes:
+                attributes[key] = old_unit.convert(attributes[key], new_unit)
         self.units = unit
 
     def is_compatible(self, other, ignore=None):
@@ -977,6 +982,10 @@ class _DimensionalMetadata(CFVariableMixin, metaclass=ABCMeta):
             value_type_name = dtype.name
 
         return value_type_name
+
+    @staticmethod
+    def _do_pointwise_unit_convert(values, old_unit, new_unit):
+        return old_unit.convert(values, new_unit)
 
 
 class AncillaryVariable(_DimensionalMetadata):
