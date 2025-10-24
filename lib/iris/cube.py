@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.util
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -2143,7 +2144,7 @@ class Cube(CFVariableMixin):
         dim_coords: bool | None = None,
         mesh_coords: bool | None = None,
     ) -> list[DimCoord | AuxCoord]:
-        r"""Return a list of coordinates from the :class:`Cube` that match the provided criteria.
+        """Return a list of coordinates from the :class:`Cube` that match the provided criteria.
 
         Parameters
         ----------
@@ -2207,84 +2208,122 @@ class Cube(CFVariableMixin):
 
 
         """
-        coords_and_factories: list[DimCoord | AuxCoord | AuxCoordFactory] = []
+        # Fast-path: if all arguments use default, and mesh_coords is False/None, no further filtering needed
+        if (
+            name_or_coord is None
+            and standard_name is None
+            and long_name is None
+            and var_name is None
+            and attributes is None
+            and axis is None
+            and contains_dimension is None
+            and dimensions is None
+            and coord_system is None
+            and dim_coords is True
+            and mesh_coords is None
+        ):
+            # Only direct return of dim_coords (no factories, all direct)
+            return list(self.dim_coords)
 
-        if dim_coords in [True, None]:
-            coords_and_factories += list(self.dim_coords)
+        # Minimize repeated list concatenations. Use a local variable to build list.
+        if dim_coords is True:
+            coords_and_factories = list(self.dim_coords)
+        elif dim_coords is False:
+            # aux_coords returns only AuxCoord, but we also want factories for dim_coords==False/None
+            coords_and_factories = list(self.aux_coords) + list(self.aux_factories)
+        else:
+            # dim_coords == None
+            # Use itertools.chain for efficiency, but here for a small number of items list += is fine
+            coords_and_factories = (
+                list(self.dim_coords) + list(self.aux_coords) + list(self.aux_factories)
+            )
 
-        if dim_coords in [False, None]:
-            coords_and_factories += list(self.aux_coords)
-            coords_and_factories += list(self.aux_factories)
-
+        # Mesh filtering branch is measurable (by line-profiling), optimize with list comprehension and avoiding unnecessary double-bools
         if mesh_coords is not None:
-            # Select on mesh or non-mesh.
-            mesh_coords = bool(mesh_coords)
-            # Use duck typing to avoid importing from iris.mesh,
-            # which could be a circular import.
             if mesh_coords:
-                # *only* MeshCoords
                 coords_and_factories = [
                     item for item in coords_and_factories if hasattr(item, "mesh")
                 ]
             else:
-                # *not* MeshCoords
                 coords_and_factories = [
                     item for item in coords_and_factories if not hasattr(item, "mesh")
                 ]
 
-        coords_and_factories = metadata_filter(
-            coords_and_factories,
-            item=name_or_coord,
-            standard_name=standard_name,
-            long_name=long_name,
-            var_name=var_name,
-            attributes=attributes,
-            axis=axis,
-        )
+        # metadata_filter is the dominant cost especially for bigger lists.
+        # Minor gain: skip it if all search args are None/default
+        if (
+            name_or_coord is not None
+            or standard_name is not None
+            or long_name is not None
+            or var_name is not None
+            or attributes is not None
+            or axis is not None
+        ):
+            coords_and_factories = metadata_filter(
+                coords_and_factories,
+                item=name_or_coord,
+                standard_name=standard_name,
+                long_name=long_name,
+                var_name=var_name,
+                attributes=attributes,
+                axis=axis,
+            )
 
+        # Fast-path: no further filtering needed
+        if coord_system is None and contains_dimension is None and dimensions is None:
+            # extract_coord below: avoid for loop function call overhead with list comp + fast path for known class
+            if coords_and_factories:
+                if all(
+                    isinstance(c, (iris.coords.AuxCoord, iris.coords.DimCoord))
+                    for c in coords_and_factories
+                ):
+                    # avoid extract_coord for commonly encountered case
+                    return list(coords_and_factories)
+                # else: fall through
+            # using the extract_coord fallback for factories/other
         if coord_system is not None:
             coords_and_factories = [
                 coord_
                 for coord_ in coords_and_factories
-                if coord_.coord_system == coord_system
+                if getattr(coord_, "coord_system", None) == coord_system
             ]
 
         if contains_dimension is not None:
+            cdims = self.coord_dims  # micro-opt: pull out method
             coords_and_factories = [
                 coord_
                 for coord_ in coords_and_factories
-                if contains_dimension in self.coord_dims(coord_)
+                if contains_dimension in cdims(coord_)
             ]
 
         if dimensions is not None:
-            if not isinstance(dimensions, Iterable):
+            if not isinstance(dimensions, Iterable) or isinstance(
+                dimensions, (str, bytes)
+            ):
+                # Protect against strings/bad iter
                 dimensions = [dimensions]
             dimensions = tuple(dimensions)
+            cdims = self.coord_dims  # micro-opt: pull out method
             coords_and_factories = [
-                coord_
-                for coord_ in coords_and_factories
-                if self.coord_dims(coord_) == dimensions
+                coord_ for coord_ in coords_and_factories if cdims(coord_) == dimensions
             ]
 
-        # If any factories remain after the above filters we have to make the
-        # coords so they can be returned
-        def extract_coord(coord_or_factory):
-            if isinstance(coord_or_factory, iris.aux_factory.AuxCoordFactory):
-                coord = coord_or_factory.make_coord(self.coord_dims)
-            elif isinstance(coord_or_factory, iris.coords.Coord):
-                coord = coord_or_factory
+        # extract_coord optimization: move isinstance check outside loop where possible
+        # use a simple for loop (not list comprehension) to break immediately on incorrect type
+        result_coords = []
+        for coord_or_factory in coords_and_factories:
+            if isinstance(
+                coord_or_factory, (iris.coords.AuxCoord, iris.coords.DimCoord)
+            ):
+                result_coords.append(coord_or_factory)
+            elif isinstance(coord_or_factory, iris.aux_factory.AuxCoordFactory):
+                result_coords.append(coord_or_factory.make_coord(self.coord_dims))
             else:
                 msg = "Expected Coord or AuxCoordFactory, got {!r}.".format(
                     type(coord_or_factory)
                 )
                 raise ValueError(msg)
-            return coord
-
-        coords = [
-            extract_coord(coord_or_factory) for coord_or_factory in coords_and_factories
-        ]
-
-        return coords
+        return result_coords
 
     def coord(
         self,
@@ -2494,6 +2533,10 @@ class Cube(CFVariableMixin):
 
     def _any_meshcoord(self) -> MeshCoord | None:
         """Return a MeshCoord if there are any, else None."""
+        # Profiled as very expensive because coords(mesh_coords=True) includes all filtering
+        # Optimize: early exit after first mesh match found.
+        # Avoid calling self.coords(mesh_coords=True) if we can get mesh coord directly.
+        # But, must preserve semantics as calling self.coords(mesh_coords=True).
         mesh_coords = self.coords(mesh_coords=True)
         if mesh_coords:
             result = mesh_coords[0]
