@@ -124,8 +124,21 @@ def unrotate_pole(rotated_lons, rotated_lats, pole_lon, pole_lat):
         lons, lats = unrotate_pole(rotated_lons, rotated_lats, pole_lon, pole_lat)
 
     """
-    src_proj = ccrs.RotatedGeodetic(pole_longitude=pole_lon, pole_latitude=pole_lat)
-    target_proj = ccrs.Geodetic()
+    if not hasattr(unrotate_pole, "_proj_cache"):
+        unrotate_pole._proj_cache = {}
+    cache = unrotate_pole._proj_cache
+
+    rp_key = (pole_lon, pole_lat)
+    src_proj = cache.get(rp_key)
+    if src_proj is None:
+        src_proj = ccrs.RotatedGeodetic(pole_longitude=pole_lon, pole_latitude=pole_lat)
+        cache[rp_key] = src_proj
+
+    target_proj = cache.get("geodetic")
+    if target_proj is None:
+        target_proj = ccrs.Geodetic()
+        cache["geodetic"] = target_proj
+
     res = target_proj.transform_points(x=rotated_lons, y=rotated_lats, src_crs=src_proj)
     unrotated_lon = res[..., 0]
     unrotated_lat = res[..., 1]
