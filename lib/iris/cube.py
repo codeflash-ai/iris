@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1644,18 +1645,18 @@ class Cube(CFVariableMixin):
                 "Factory must be a subclass of iris.aux_factory.AuxCoordFactory."
             )
 
-        # Get all 'real' coords (i.e. not derived ones) : use private data
-        # rather than cube.coords(), as that is quite slow.
-        def coordsonly(coords_and_dims):
-            return [coord for coord, dims in coords_and_dims]
-
-        cube_coords = coordsonly(self._dim_coords_and_dims) + coordsonly(
-            self._aux_coords_and_dims
-        )
+        # Gather all existing coords in one pass.
+        cube_coords = []
+        for coord, _ in self._dim_coords_and_dims:
+            cube_coords.append(coord)
+        for coord, _ in self._aux_coords_and_dims:
+            cube_coords.append(coord)
+        # Use set of id() for O(1) identity checks
+        cube_coords_id_set = {id(coord) for coord in cube_coords}
 
         for dependency in aux_factory.dependencies:
             ref_coord = aux_factory.dependencies[dependency]
-            if ref_coord is not None and ref_coord not in cube_coords:
+            if ref_coord is not None and id(ref_coord) not in cube_coords_id_set:
                 msg = "{} coordinate for factory is not present on cube {}"
                 raise iris.exceptions.CannotAddError(
                     msg.format(ref_coord.name(), self.name())
