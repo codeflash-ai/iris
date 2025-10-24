@@ -14,6 +14,8 @@ import re
 
 import iris.exceptions
 
+_URI_SCHEME_PATTERN = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]+):(.+)")
+
 
 # Saving routines, indexed by file extension.
 class _SaversDict(dict):
@@ -123,7 +125,7 @@ def decode_uri(uri, default="file"):
         # make sure scheme has at least 2 letters to avoid windows drives
         # put - last in the brackets so it refers to the character, not a range
         # reference on valid schemes: https://tools.ietf.org/html/std66#section-3.1
-        match = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]+):(.+)", uri)
+        match = _URI_SCHEME_PATTERN.match(uri)
         if match:
             scheme = match.group(1)
             part = match.group(2)
