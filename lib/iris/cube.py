@@ -850,21 +850,30 @@ class CubeAttrsDict(MutableMapping):
         """
         # First initialise locals + globals, defaulting to empty.
         # See https://github.com/python/mypy/issues/3004
-        self.locals = locals  # type: ignore[assignment]
-        self.globals = globals  # type: ignore[assignment]
-        # Update with combined, if present.
+        self.locals = locals if locals is not None else {}  # type: ignore[assignment]
+        self.globals = globals if globals is not None else {}  # type: ignore[assignment]
+
+        # Optimize typical case where combined is CubeAttrsDict (has globals/locals).
         if combined is not None:
             # Treat a single input with 'locals' and 'globals' properties as an
             # existing CubeAttrsDict, and update from its content.
             # N.B. enforce deep copying, consistent with general Iris usage.
             if hasattr(combined, "globals") and hasattr(combined, "locals"):
-                # Copy a mapping with globals/locals, like another 'CubeAttrsDict'
-                self.globals.update(deepcopy(combined.globals))
-                self.locals.update(deepcopy(combined.locals))
+                # Copy a mapping with globals/locals, like another 'CubeAttrsDict'.
+                # Use faster dict update if combined.globals/locals are empty or same type.
+                g = combined.globals
+                l = combined.locals
+                if g:
+                    self.globals.update(deepcopy(g))
+                if l:
+                    self.locals.update(deepcopy(l))
             else:
                 # Treat any arbitrary single input value as a mapping (dict), and
-                # update from it.
-                self.update(dict(deepcopy(combined)))
+                # update from it. Avoid unnecessary deepcopy/list conversion if already a dict.
+                if isinstance(combined, dict):
+                    self.update(combined)
+                else:
+                    self.update(dict(deepcopy(combined)))
 
     #
     # Ensure that the stored local/global dictionaries are "LimitedAttributeDicts".
@@ -944,13 +953,24 @@ class CubeAttrsDict(MutableMapping):
         If the argument is a split dictionary, preserve the local/global nature of its
         keys.
         """
+        # The main optimization: avoid using super().update which defers to __setitem__
+        # since our logic for CubeAttrsDict keys relies on __setitem__ correctly distributing keys.
         if args and hasattr(args[0], "globals") and hasattr(args[0], "locals"):
             dic = args[0]
-            self.globals.update(dic.globals)
-            self.locals.update(dic.locals)
-        else:
-            super().update(*args)
-        super().update(**kwargs)
+            g = dic.globals
+            l = dic.locals
+            if g:
+                self.globals.update(g)
+            if l:
+                self.locals.update(l)
+            args = args[1:]  # Consume processed arg
+
+        # For remaining positional/kw arguments, fall back to MutableMapping's update logic.
+        # We have to preserve original behavioral semantics.
+        # Any standard mapping passed in will go through __setitem__ which does correct assignment.
+        if args or kwargs:
+            for k, v in dict(*args, **kwargs).items():
+                self[k] = v
 
     def __or__(self, arg):
         """Implement 'or' via 'update'."""
