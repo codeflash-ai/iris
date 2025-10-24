@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.util
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1150,37 +1151,32 @@ class Cube(CFVariableMixin):
             attributes.
 
         """
-        from xml.dom.minidom import Document
 
         def _walk_nodes(node):
             """Note: _walk_nodes is called recursively on child elements."""
-            # we don't want to copy the children here, so take a shallow copy
-            new_node = node.cloneNode(deep=False)
+            # Optimization: sort attributes in-place, no remove/clone cycles.
+            if node.attributes:
+                attr_names = sorted(node.attributes.keys())
+                # Get current values for attributes by name
+                attrs = {
+                    attr_name: node.getAttribute(attr_name) for attr_name in attr_names
+                }
+                # Remove all old attributes
+                for attr_name in list(node.attributes.keys()):
+                    node.removeAttribute(attr_name)
+                # Set sorted attributes
+                for attr_name in attr_names:
+                    node.setAttribute(attr_name, attrs[attr_name])
 
-            # Versions of python <3.8 order attributes in alphabetical order.
-            # Python >=3.8 order attributes in insert order.  For consistent behaviour
-            # across both, we'll go with alphabetical order always.
-            # Remove all the attribute nodes, then add back in alphabetical order.
-            attrs = [
-                new_node.getAttributeNode(attr_name).cloneNode(deep=True)
-                for attr_name in sorted(node.attributes.keys())
-            ]
-            for attr in attrs:
-                new_node.removeAttributeNode(attr)
-            for attr in attrs:
-                new_node.setAttributeNode(attr)
-
-            if node.childNodes:
-                children = [_walk_nodes(x) for x in node.childNodes]
-                for c in children:
-                    new_node.appendChild(c)
-
-            return new_node
+            # Recursively process children
+            for child in node.childNodes:
+                _walk_nodes(child)
+            return node
 
         nodes = _walk_nodes(doc.documentElement)
+        # New document, append processed tree
         new_doc = Document()
         new_doc.appendChild(nodes)
-
         return new_doc
 
     def __init__(
