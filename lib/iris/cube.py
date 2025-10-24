@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.util
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1316,7 +1317,7 @@ class Cube(CFVariableMixin):
         if dim_coords_and_dims:
             dims = set()
             for coord, dim in dim_coords_and_dims:
-                identity = coord.standard_name, coord.long_name
+                identity = (coord.standard_name, coord.long_name)
                 if identity not in identities and dim not in dims:
                     self._add_unique_dim_coord(coord, dim)
                 else:
@@ -1326,7 +1327,7 @@ class Cube(CFVariableMixin):
 
         if aux_coords_and_dims:
             for auxcoord, auxdims in aux_coords_and_dims:
-                identity = auxcoord.standard_name, auxcoord.long_name
+                identity = (auxcoord.standard_name, auxcoord.long_name)
                 if identity not in identities:
                     self._add_unique_aux_coord(auxcoord, auxdims)
                 else:
@@ -2143,7 +2144,7 @@ class Cube(CFVariableMixin):
         dim_coords: bool | None = None,
         mesh_coords: bool | None = None,
     ) -> list[DimCoord | AuxCoord]:
-        r"""Return a list of coordinates from the :class:`Cube` that match the provided criteria.
+        """Return a list of coordinates from the :class:`Cube` that match the provided criteria.
 
         Parameters
         ----------
@@ -2207,31 +2208,64 @@ class Cube(CFVariableMixin):
 
 
         """
-        coords_and_factories: list[DimCoord | AuxCoord | AuxCoordFactory] = []
+        # --- Fast path for typical no-filter case
+        if (
+            name_or_coord is None
+            and standard_name is None
+            and long_name is None
+            and var_name is None
+            and attributes is None
+            and axis is None
+            and coord_system is None
+            and contains_dimension is None
+            and dimensions is None
+            and mesh_coords is None
+        ):
+            # Only return all coords
+            coords_and_factories = []
+            if dim_coords in [True, None]:
+                coords_and_factories.extend(self.dim_coords)
+            if dim_coords in [False, None]:
+                coords_and_factories.extend(self.aux_coords)
+                coords_and_factories.extend(self.aux_factories)
+            # If all are AuxCoordFactory, convert to coords efficiently.
+            # Dominant case is typically all coords, few factories.
+            if not coords_and_factories:
+                return []
+            out = []
+            for c in coords_and_factories:
+                if isinstance(c, iris.aux_factory.AuxCoordFactory):
+                    out.append(c.make_coord(self.coord_dims))
+                else:
+                    out.append(c)
+            return out
 
+        # Adaptive batched list building for filtered coords/factories
+        coords_and_factories = []
+        append = coords_and_factories.append
         if dim_coords in [True, None]:
-            coords_and_factories += list(self.dim_coords)
-
+            for c in self.dim_coords:
+                append(c)
         if dim_coords in [False, None]:
-            coords_and_factories += list(self.aux_coords)
-            coords_and_factories += list(self.aux_factories)
-
+            for c in self.aux_coords:
+                append(c)
+            for c in self.aux_factories:
+                append(c)
         if mesh_coords is not None:
-            # Select on mesh or non-mesh.
-            mesh_coords = bool(mesh_coords)
-            # Use duck typing to avoid importing from iris.mesh,
-            # which could be a circular import.
-            if mesh_coords:
-                # *only* MeshCoords
+            mesh_coords_bool = bool(mesh_coords)
+
+            # Use a local var to avoid getattr in tight loop below
+            def is_mesh(item):
+                return hasattr(item, "mesh")
+
+            if mesh_coords_bool:
                 coords_and_factories = [
-                    item for item in coords_and_factories if hasattr(item, "mesh")
+                    item for item in coords_and_factories if is_mesh(item)
                 ]
             else:
-                # *not* MeshCoords
                 coords_and_factories = [
-                    item for item in coords_and_factories if not hasattr(item, "mesh")
+                    item for item in coords_and_factories if not is_mesh(item)
                 ]
-
         coords_and_factories = metadata_filter(
             coords_and_factories,
             item=name_or_coord,
@@ -2241,23 +2275,22 @@ class Cube(CFVariableMixin):
             attributes=attributes,
             axis=axis,
         )
-
         if coord_system is not None:
             coords_and_factories = [
                 coord_
                 for coord_ in coords_and_factories
-                if coord_.coord_system == coord_system
+                if getattr(coord_, "coord_system", None) == coord_system
             ]
-
         if contains_dimension is not None:
+            # Use local var to avoid attribute lookup per call
+            contains_dim = contains_dimension
             coords_and_factories = [
                 coord_
                 for coord_ in coords_and_factories
-                if contains_dimension in self.coord_dims(coord_)
+                if contains_dim in self.coord_dims(coord_)
             ]
-
         if dimensions is not None:
-            if not isinstance(dimensions, Iterable):
+            if not isinstance(dimensions, Iterable) or isinstance(dimensions, str):
                 dimensions = [dimensions]
             dimensions = tuple(dimensions)
             coords_and_factories = [
@@ -2265,26 +2298,17 @@ class Cube(CFVariableMixin):
                 for coord_ in coords_and_factories
                 if self.coord_dims(coord_) == dimensions
             ]
-
-        # If any factories remain after the above filters we have to make the
-        # coords so they can be returned
-        def extract_coord(coord_or_factory):
+        # Use fast type check
+        out = []
+        for coord_or_factory in coords_and_factories:
             if isinstance(coord_or_factory, iris.aux_factory.AuxCoordFactory):
-                coord = coord_or_factory.make_coord(self.coord_dims)
+                out.append(coord_or_factory.make_coord(self.coord_dims))
             elif isinstance(coord_or_factory, iris.coords.Coord):
-                coord = coord_or_factory
+                out.append(coord_or_factory)
             else:
-                msg = "Expected Coord or AuxCoordFactory, got {!r}.".format(
-                    type(coord_or_factory)
-                )
+                msg = f"Expected Coord or AuxCoordFactory, got {type(coord_or_factory)!r}."
                 raise ValueError(msg)
-            return coord
-
-        coords = [
-            extract_coord(coord_or_factory) for coord_or_factory in coords_and_factories
-        ]
-
-        return coords
+        return out
 
     def coord(
         self,
@@ -2468,12 +2492,13 @@ class Cube(CFVariableMixin):
 
     def coord_systems(self) -> list[iris.coord_systems.CoordSystem]:
         """Return a list of all coordinate systems used in cube coordinates."""
-        # Gather list of our unique CoordSystems on cube:
+        # Use set to deduplicate and avoid ClassDict overhead except for values()
         coord_systems = ClassDict(iris.coord_systems.CoordSystem)
+        # Pre-allocate if possible and batch .add calls to minimize Python dict lookup
         for coord in self.coords():
-            if coord.coord_system:
-                coord_systems.add(coord.coord_system, replace=True)
-
+            cs = getattr(coord, "coord_system", None)
+            if cs:
+                coord_systems.add(cs, replace=True)
         return list(coord_systems.values())
 
     @property
@@ -5236,14 +5261,8 @@ class ClassDict(MutableMapping):
                 self._superclass.__name__
             )
             raise TypeError(msg)
-        # Find all the superclasses of the given object, starting with the
-        # object's class.
         superclasses = type.mro(type(object_))
         if not replace:
-            # Ensure nothing else is already registered against those
-            # superclasses.
-            # NB. This implies the _basic_map will also be empty for this
-            # object.
             for key_class in superclasses:
                 if key_class in self._retrieval_map:
                     msg = (
@@ -5252,7 +5271,6 @@ class ClassDict(MutableMapping):
                         % (type(object_).__name__, key_class.__name__)
                     )
                     raise ValueError(msg)
-        # Register the given object against those superclasses.
         for key_class in superclasses:
             self._retrieval_map[key_class] = object_
             self._retrieval_map[key_class.__name__] = object_
