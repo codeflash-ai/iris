@@ -133,25 +133,32 @@ class UkmoProcessFlagsHandler(AttributeHandler):
     _NetcdfIdentifyingNames = ["ukmo__process_flags"]
 
     def encode_object(self, value: Any) -> tuple[str, str]:
-        if not isinstance(value, tuple) or any(
-            not isinstance(elem, str) for elem in value
-        ):
+        if not isinstance(value, tuple):
             msg = (
                 f"Invalid 'ukmo__process_flags' attribute : {value!r}. "
                 "Must be a tuple of str."
             )
             raise TypeError(msg)
 
-        def value_fix(value):
-            value = value.replace(" ", "_")
-            if value == "":
-                # Special handling for an empty string entry, which otherwise upsets
-                #  the split/join process.
-                value = "<EMPTY>"
-            return value
+        # Avoid repeated builtins and encapsulate logic locally for better performance
+        value_list = []
+        for elem in value:
+            if not isinstance(elem, str):
+                msg = (
+                    f"Invalid 'ukmo__process_flags' attribute : {value!r}. "
+                    "Must be a tuple of str."
+                )
+                raise TypeError(msg)
 
-        value = " ".join([value_fix(x) for x in value])
-        return self._primary_nc_name, value
+            # Inline the value_fix logic for better performance
+            # Replace space with underscore; handle empty string with sentinel.
+            fixed_elem = elem.replace(" ", "_")
+            if fixed_elem == "":
+                fixed_elem = "<EMPTY>"
+            value_list.append(fixed_elem)
+
+        value_str = " ".join(value_list)
+        return self._primary_nc_name, value_str
 
     def decode_attribute(self, attr_value: Any) -> Any:
         # In this case the attribute name does not matter.
