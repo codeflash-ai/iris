@@ -17,8 +17,6 @@ import numpy as np
 
 import iris.std_names
 
-from .metadata import BaseMetadata
-
 __all__ = ["CFVariableMixin", "LimitedAttributeDict"]
 
 
@@ -217,7 +215,6 @@ class Unit(cf_units.Unit):
 class CFVariableMixin:
     _metadata_manager: Any
 
-    @wraps(BaseMetadata.name)
     def name(
         self,
         default: str | None = None,
