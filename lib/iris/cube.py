@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -2001,6 +2002,18 @@ class Cube(CFVariableMixin):
         tuple:
              A tuple of the data dimensions relevant to the given cell measure.
         """
+        if isinstance(cell_measure, CellMeasure):
+            dims = next(
+                (
+                    dims
+                    for cm_, dims in self._cell_measures_and_dims
+                    if cm_ is cell_measure
+                ),
+                None,
+            )
+            if dims is not None:
+                return dims
+
         cell_measure = self.cell_measure(cell_measure)
 
         # Search for existing cell measure (object) on the cube, faster lookup
