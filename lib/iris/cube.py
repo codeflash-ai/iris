@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1277,37 +1278,20 @@ class Cube(CFVariableMixin):
         # Initialise the cube data manager.
         self._data_manager = DataManager(data, shape)
 
-        #: The "standard name" for the Cube's phenomenon.
         self.standard_name = standard_name
-
-        #: An instance of :class:`cf_units.Unit` describing the Cube's data.
         self.units = units
-
-        #: The "long name" for the Cube's phenomenon.
         self.long_name = long_name
-
-        #: The NetCDF variable name for the Cube.
         self.var_name = var_name
 
-        # See https://github.com/python/mypy/issues/3004.
         self.cell_methods = cell_methods  # type: ignore[assignment]
-
-        #: A dictionary for arbitrary Cube metadata.
-        #: A few keys are restricted - see :class:`CubeAttrsDict`.
-        # See https://github.com/python/mypy/issues/3004.
         self.attributes = attributes  # type: ignore[assignment]
 
-        # Coords
         self._dim_coords_and_dims: list[tuple[DimCoord, int]] = []
         self._aux_coords_and_dims: list[
             tuple[AuxCoord | DimCoord, tuple[int, ...]]
         ] = []
         self._aux_factories: list[AuxCoordFactory] = []
-
-        # Cell Measures
         self._cell_measures_and_dims: list[tuple[CellMeasure, tuple[int, ...]]] = []
-
-        # Ancillary Variables
         self._ancillary_variables_and_dims: list[
             tuple[AncillaryVariable, tuple[int, ...]]
         ] = []
@@ -1316,7 +1300,7 @@ class Cube(CFVariableMixin):
         if dim_coords_and_dims:
             dims = set()
             for coord, dim in dim_coords_and_dims:
-                identity = coord.standard_name, coord.long_name
+                identity = (coord.standard_name, coord.long_name)
                 if identity not in identities and dim not in dims:
                     self._add_unique_dim_coord(coord, dim)
                 else:
@@ -1326,7 +1310,7 @@ class Cube(CFVariableMixin):
 
         if aux_coords_and_dims:
             for auxcoord, auxdims in aux_coords_and_dims:
-                identity = auxcoord.standard_name, auxcoord.long_name
+                identity = (auxcoord.standard_name, auxcoord.long_name)
                 if identity not in identities:
                     self._add_unique_aux_coord(auxcoord, auxdims)
                 else:
@@ -2030,22 +2014,13 @@ class Cube(CFVariableMixin):
         tuple:
              A tuple of the data dimensions relevant to the given ancillary variable.
         """
-        ancillary_variable = self.ancillary_variable(ancillary_variable)
+        # Use a single-pass lookup for O(1) best-case performance
+        obj = self.ancillary_variable(ancillary_variable)
+        for av, dims in self._ancillary_variables_and_dims:
+            if av is obj:
+                return dims
 
-        # Search for existing ancillary variable (object) on the cube, faster
-        # lookup than equality - makes no functional difference.
-        matches = [
-            dims
-            for av, dims in self._ancillary_variables_and_dims
-            if av is ancillary_variable
-        ]
-
-        if not matches:
-            raise iris.exceptions.AncillaryVariableNotFoundError(
-                ancillary_variable.name()
-            )
-
-        return matches[0]
+        raise iris.exceptions.AncillaryVariableNotFoundError(obj.name())
 
     def aux_factory(
         self,
@@ -2747,37 +2722,32 @@ class Cube(CFVariableMixin):
         """
         ancillary_variables = self.ancillary_variables(name_or_ancillary_variable)
 
-        if len(ancillary_variables) > 1:
+        length = len(ancillary_variables)
+        if length == 1:
+            return ancillary_variables[0]
+
+        is_name = isinstance(name_or_ancillary_variable, str)
+        if length > 1:
             msg = (
                 "Expected to find exactly 1 ancillary_variable, but found "
-                "{}. They were: {}."
-            )
-            msg = msg.format(
-                len(ancillary_variables),
-                ", ".join(anc_var.name() for anc_var in ancillary_variables),
+                f"{length}. They were: {', '.join(anc_var.name() for anc_var in ancillary_variables)}."
             )
             raise iris.exceptions.AncillaryVariableNotFoundError(msg)
-        elif len(ancillary_variables) == 0:
-            if isinstance(name_or_ancillary_variable, str):
-                bad_name = name_or_ancillary_variable
-            else:
-                bad_name = (
-                    name_or_ancillary_variable and name_or_ancillary_variable.name()
-                ) or ""
-                if name_or_ancillary_variable is not None:
-                    emsg = (
-                        "Expected to find exactly 1 ancillary_variable matching the "
-                        f"given {bad_name!r} ancillary_variable's metadata, but found "
-                        "none."
-                    )
-                    raise iris.exceptions.AncillaryVariableNotFoundError(emsg)
-            msg = (
-                f"Expected to find exactly 1 {bad_name!r} ancillary_variable, "
-                "but found none."
+        elif length == 0:
+            bad_name = (
+                name_or_ancillary_variable
+                if is_name
+                else (name_or_ancillary_variable and name_or_ancillary_variable.name())
+                or ""
             )
+            if not is_name and name_or_ancillary_variable is not None:
+                emsg = (
+                    "Expected to find exactly 1 ancillary_variable matching the "
+                    f"given {bad_name!r} ancillary_variable's metadata, but found none."
+                )
+                raise iris.exceptions.AncillaryVariableNotFoundError(emsg)
+            msg = f"Expected to find exactly 1 {bad_name!r} ancillary_variable, but found none."
             raise iris.exceptions.AncillaryVariableNotFoundError(msg)
-
-        return ancillary_variables[0]
 
     @property
     def cell_methods(self) -> tuple[CellMethod, ...]:
