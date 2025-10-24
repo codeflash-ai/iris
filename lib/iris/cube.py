@@ -45,6 +45,8 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
+import iris.util
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1948,23 +1950,18 @@ class Cube(CFVariableMixin):
 
         coord_id = id(coord)
 
-        # Dimension of dimension coordinate by object id
-        dims_by_id: dict[int, tuple[int, ...]] = {
-            id(c): (d,) for c, d in self._dim_coords_and_dims
-        }
-        # Check for id match - faster than equality check
-        match = dims_by_id.get(coord_id)
+        # Search dim_coords by id first for fast object identity match.
+        for c, d in self._dim_coords_and_dims:
+            if id(c) == coord_id:
+                return (d,)
 
-        if match is None:
-            # Dimension/s of auxiliary coordinate by object id
-            aux_dims_by_id = {id(c): d for c, d in self._aux_coords_and_dims}
-            # Check for id match - faster than equality
-            match = aux_dims_by_id.get(coord_id)
-            if match is None:
-                dims_by_id.update(aux_dims_by_id)
+        # Search aux_coords by id for fast object identity match.
+        for c, d in self._aux_coords_and_dims:
+            if id(c) == coord_id:
+                return d
 
         # Search derived aux coordinates
-        if match is None:
+        if hasattr(coord, "metadata"):
             target_metadata = coord.metadata
 
             def matcher(factory):
@@ -1973,20 +1970,22 @@ class Cube(CFVariableMixin):
             factories = filter(matcher, self._aux_factories)
             matches = [factory.derived_dims(self.coord_dims) for factory in factories]
             if matches:
-                match = matches[0]
+                return matches[0]
 
-        if match is None and not name_provided:
+        if not name_provided:
             # We may have an equivalent coordinate but not the actual
             # cube coordinate instance - so forced to perform coordinate
             # lookup to attempt to retrieve it
             coord = self.coord(coord)
             # Check for id match - faster than equality
-            match = dims_by_id.get(id(coord))
+            for c, d in self._dim_coords_and_dims:
+                if id(c) == coord_id:
+                    return (d,)
+            for c, d in self._aux_coords_and_dims:
+                if id(c) == coord_id:
+                    return d
 
-        if match is None:
-            raise iris.exceptions.CoordinateNotFoundError(coord.name())
-
-        return match
+        raise iris.exceptions.CoordinateNotFoundError(coord.name())
 
     def cell_measure_dims(self, cell_measure: str | CellMeasure) -> tuple[int, ...]:
         """Return a tuple of the data dimensions relevant to the given CellMeasure.
@@ -2305,7 +2304,7 @@ class Cube(CFVariableMixin):
         dim_coords: bool | None = None,
         mesh_coords: bool | None = None,
     ) -> DimCoord | AuxCoord:
-        r"""Return a single coordinate from the :class:`Cube` that matches the provided criteria.
+        """Return a single coordinate from the :class:`Cube` that matches the provided criteria.
 
         Parameters
         ----------
@@ -2389,28 +2388,28 @@ class Cube(CFVariableMixin):
             mesh_coords=mesh_coords,
         )
 
-        if len(coords) > 1:
-            emsg = (
-                f"Expected to find exactly 1 coordinate, but found {len(coords)}. "
-                f"They were: {', '.join(coord.name() for coord in coords)}."
-            )
-            raise iris.exceptions.CoordinateNotFoundError(emsg)
-        elif len(coords) == 0:
-            _name = name_or_coord
-            if name_or_coord is not None:
-                if not isinstance(name_or_coord, str):
-                    _name = name_or_coord.name()
-                    emsg = (
-                        "Expected to find exactly 1 coordinate matching the given "
-                        f"{_name!r} coordinate's metadata, but found none."
-                    )
-                    raise iris.exceptions.CoordinateNotFoundError(emsg)
+        n_coords = len(coords)
+        if n_coords != 1:
+            if n_coords > 1:
+                emsg = (
+                    f"Expected to find exactly 1 coordinate, but found {n_coords}. "
+                    f"They were: {', '.join(coord.name() for coord in coords)}."
+                )
+                raise iris.exceptions.CoordinateNotFoundError(emsg)
+            else:
+                _name = name_or_coord
+                if name_or_coord is not None:
+                    if not isinstance(name_or_coord, str):
+                        _name = name_or_coord.name()
+                        emsg = (
+                            "Expected to find exactly 1 coordinate matching the given "
+                            f"{_name!r} coordinate's metadata, but found none."
+                        )
+                        raise iris.exceptions.CoordinateNotFoundError(emsg)
 
-            bad_name = _name or standard_name or long_name or ""
-            emsg = (
-                f"Expected to find exactly 1 {bad_name!r} coordinate, but found none."
-            )
-            raise iris.exceptions.CoordinateNotFoundError(emsg)
+                bad_name = _name or standard_name or long_name or ""
+                emsg = f"Expected to find exactly 1 {bad_name!r} coordinate, but found none."
+                raise iris.exceptions.CoordinateNotFoundError(emsg)
 
         return coords[0]
 
