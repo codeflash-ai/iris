@@ -1403,85 +1403,77 @@ class Cell(namedtuple("Cell", ["point", "bound"])):
         Cell vs Cell comparison is used to define a strict order.
         Non-Cell vs Cell comparison is used to define Constraint matching.
 
-        """  # noqa: D401
-        if (isinstance(other, list) and len(other) == 1) or (
-            isinstance(other, np.ndarray) and other.shape == (1,)
-        ):
+        """
+        # Fast path for Cell
+        other_type = type(other)
+        if other_type is Cell:
+            # Cell vs Cell comparison for providing a strict sort order
+            self_bound = self.bound
+            other_bound = other.bound
+            if self_bound is None:
+                if other_bound is None:
+                    # Point vs point - Simple ordering
+                    return operator_method(self.point, other.point)
+                # Point vs point-and-bound
+                # If points equal, point-only Cell is defined as less
+                if self.point == other.point:
+                    return operator_method in (operator.lt, operator.le)
+                return operator_method(self.point, other.point)
+            else:
+                if other_bound is None:
+                    # Point-and-bound vs point
+                    if self.point == other.point:
+                        return operator_method in (operator.gt, operator.ge)
+                    return operator_method(self.point, other.point)
+                # Point-and-bound vs point-and-bound
+                # Ordered on min bound, then max bound, then point
+                sb0, ob0 = self_bound[0], other_bound[0]
+                if sb0 == ob0:
+                    sb1, ob1 = self_bound[1], other_bound[1]
+                    if sb1 == ob1:
+                        return operator_method(self.point, other.point)
+                    return operator_method(sb1, ob1)
+                return operator_method(sb0, ob0)
+
+        # Handle common ndarray/array or list-of-one case with reduced checks
+        # -- fast-path for scalar int/float is unaffected
+        if isinstance(other, list) and len(other) == 1:
             other = other[0]
-        if isinstance(other, np.ndarray) and other.shape == ():
-            other = float(other)
+        elif isinstance(other, np.ndarray):
+            shape = other.shape
+            if shape == (1,):
+                other = other[0]
+            elif shape == ():  # zero-dim numpy scalar
+                # Use np.asscalar(other) removed since numpy 1.16, so use float for performance
+                other = float(other)
+
+        # Fast rejection for not supported types.
+        # np.number (not instance, but type, so must use type check) can be expensive,
+        # but we keep the format to preserve behavior
         if not (
-            isinstance(other, (int, float, np.number, Cell))
+            isinstance(other, (int, float, Cell))
+            or (isinstance(other, np.number))
             or hasattr(other, "timetuple")
         ):
             raise TypeError("Unexpected type of other {}.".format(type(other)))
-        if operator_method not in (
-            operator.gt,
-            operator.lt,
-            operator.ge,
-            operator.le,
-        ):
+
+        # Use a set for membership checks outside the main branch for ultra-fast lookup
+        if operator_method not in {operator.gt, operator.lt, operator.ge, operator.le}:
             raise ValueError("Unexpected operator_method")
 
-        if isinstance(other, Cell):
-            # Cell vs Cell comparison for providing a strict sort order
-            if self.bound is None:
-                if other.bound is None:
-                    # Point vs point
-                    # - Simple ordering
-                    result = operator_method(self.point, other.point)
-                else:
-                    # Point vs point-and-bound
-                    # - Simple ordering of point values, but if the two
-                    #   points are equal, we make the arbitrary choice
-                    #   that the point-only Cell is defined as less than
-                    #   the point-and-bound Cell.
-                    if self.point == other.point:
-                        result = operator_method in (operator.lt, operator.le)
-                    else:
-                        result = operator_method(self.point, other.point)
-            else:
-                if other.bound is None:
-                    # Point-and-bound vs point
-                    # - Simple ordering of point values, but if the two
-                    #   points are equal, we make the arbitrary choice
-                    #   that the point-only Cell is defined as less than
-                    #   the point-and-bound Cell.
-                    if self.point == other.point:
-                        result = operator_method in (operator.gt, operator.ge)
-                    else:
-                        result = operator_method(self.point, other.point)
-                else:
-                    # Point-and-bound vs point-and-bound
-                    # - Primarily ordered on minimum-bound. If the
-                    #   minimum-bounds are equal, then ordered on
-                    #   maximum-bound. If the maximum-bounds are also
-                    #   equal, then ordered on point values.
-                    if self.bound[0] == other.bound[0]:
-                        if self.bound[1] == other.bound[1]:
-                            result = operator_method(self.point, other.point)
-                        else:
-                            result = operator_method(self.bound[1], other.bound[1])
-                    else:
-                        result = operator_method(self.bound[0], other.bound[0])
+        # Now, constraint matching logic for non-Cell
+        if self.bound is None:
+            me = self.point
         else:
-            # Cell vs number (or string, or datetime-like) for providing
-            # Constraint behaviour.
-            if self.bound is None:
-                # Point vs number
-                # - Simple matching
-                me = self.point
+            # Point-and-bound vs number: match if "within" the Cell
+            # operator_method in [operator.gt, operator.le] -> min
+            # operator_method in [operator.lt, operator.ge] -> max
+            if operator_method is operator.gt or operator_method is operator.le:
+                me = min(self.bound)
             else:
-                # Point-and-bound vs number
-                # - Match if "within" the Cell
-                if operator_method in [operator.gt, operator.le]:
-                    me = min(self.bound)
-                else:
-                    me = max(self.bound)
+                me = max(self.bound)
 
-            result = operator_method(me, other)
-
-        return result
+        return operator_method(me, other)
 
     def __ge__(self, other):
         return self.__common_cmp__(other, operator.ge)
