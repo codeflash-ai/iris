@@ -335,7 +335,8 @@ class MagicNumber(FileElement):
         return result
 
     def __repr__(self):
-        return "MagicNumber({}, {})".format(self._num_bytes, self._offset)
+        # Use f-string for faster formatting
+        return f"MagicNumber({self._num_bytes}, {self._offset})"
 
 
 class FileExtension(FileElement):
