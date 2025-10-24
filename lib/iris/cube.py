@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1316,22 +1317,23 @@ class Cube(CFVariableMixin):
         if dim_coords_and_dims:
             dims = set()
             for coord, dim in dim_coords_and_dims:
-                identity = coord.standard_name, coord.long_name
+                identity = (coord.standard_name, coord.long_name)
+                # Only add when it's not present; if present, skip
                 if identity not in identities and dim not in dims:
                     self._add_unique_dim_coord(coord, dim)
+                    identities.add(identity)
+                    dims.add(dim)
                 else:
                     self.add_dim_coord(coord, dim)
-                identities.add(identity)
-                dims.add(dim)
 
         if aux_coords_and_dims:
             for auxcoord, auxdims in aux_coords_and_dims:
-                identity = auxcoord.standard_name, auxcoord.long_name
+                identity = (auxcoord.standard_name, auxcoord.long_name)
                 if identity not in identities:
                     self._add_unique_aux_coord(auxcoord, auxdims)
+                    identities.add(identity)
                 else:
                     self.add_aux_coord(auxcoord, auxdims)
-                identities.add(identity)
 
         if aux_factories:
             for factory in aux_factories:
@@ -1546,20 +1548,22 @@ class Cube(CFVariableMixin):
     ) -> tuple[int, ...]:
         # Convert to a tuple of integers
         if data_dims is None:
-            data_dims = tuple()
+            dims_tuple = tuple()
+        elif isinstance(data_dims, tuple):
+            dims_tuple = data_dims
         elif isinstance(data_dims, Iterable):
-            data_dims = tuple(int(d) for d in data_dims)
+            dims_tuple = tuple(int(d) for d in data_dims)
         else:
-            data_dims = (int(data_dims),)
+            dims_tuple = (int(data_dims),)
 
-        if data_dims:
-            if len(data_dims) != metadata.ndim:
+        if dims_tuple:
+            if len(dims_tuple) != metadata.ndim:
                 msg = "Invalid data dimensions: {} given, {} expected for {!r}.".format(
-                    len(data_dims), metadata.ndim, metadata.name()
+                    len(dims_tuple), metadata.ndim, metadata.name()
                 )
                 raise iris.exceptions.CannotAddError(msg)
             # Check compatibility with the shape of the data
-            for i, dim in enumerate(data_dims):
+            for i, dim in enumerate(dims_tuple):
                 if metadata.shape[i] != self.shape[dim]:
                     msg = (
                         "Unequal lengths. Cube dimension {} => {};"
@@ -1578,7 +1582,7 @@ class Cube(CFVariableMixin):
             msg = "Missing data dimensions for multi-valued {} {!r}"
             msg = msg.format(metadata.__class__.__name__, metadata.name())
             raise iris.exceptions.CannotAddError(msg)
-        return data_dims
+        return dims_tuple
 
     def _add_unique_aux_coord(
         self,
