@@ -1943,12 +1943,12 @@ class Coord(_DimensionalMetadata):
         self._sanity_check_bounds()
 
         if self.ndim == 1:
-            contiguous = np.allclose(
+            # Optimize by computing np.isclose once and reusing the result
+            is_close_mask = np.isclose(
                 self.bounds[1:, 0], self.bounds[:-1, 1], rtol=rtol, atol=atol
             )
-            diffs = ~np.isclose(
-                self.bounds[1:, 0], self.bounds[:-1, 1], rtol=rtol, atol=atol
-            )
+            contiguous = np.all(is_close_mask)
+            diffs = ~is_close_mask
 
         elif self.ndim == 2:
 
