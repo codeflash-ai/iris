@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.util
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1267,71 +1268,53 @@ class Cube(CFVariableMixin):
             ...                                  (longitude, 1)])
 
         """
-        # Temporary error while we transition the API.
         if isinstance(data, str):
             raise TypeError("Invalid data type: {!r}.".format(data))
 
-        # Configure the metadata manager.
         self._metadata_manager = metadata_manager_factory(CubeMetadata)
-
-        # Initialise the cube data manager.
         self._data_manager = DataManager(data, shape)
 
-        #: The "standard name" for the Cube's phenomenon.
         self.standard_name = standard_name
-
-        #: An instance of :class:`cf_units.Unit` describing the Cube's data.
         self.units = units
-
-        #: The "long name" for the Cube's phenomenon.
         self.long_name = long_name
-
-        #: The NetCDF variable name for the Cube.
         self.var_name = var_name
-
-        # See https://github.com/python/mypy/issues/3004.
         self.cell_methods = cell_methods  # type: ignore[assignment]
-
-        #: A dictionary for arbitrary Cube metadata.
-        #: A few keys are restricted - see :class:`CubeAttrsDict`.
-        # See https://github.com/python/mypy/issues/3004.
         self.attributes = attributes  # type: ignore[assignment]
 
-        # Coords
         self._dim_coords_and_dims: list[tuple[DimCoord, int]] = []
         self._aux_coords_and_dims: list[
             tuple[AuxCoord | DimCoord, tuple[int, ...]]
         ] = []
         self._aux_factories: list[AuxCoordFactory] = []
-
-        # Cell Measures
         self._cell_measures_and_dims: list[tuple[CellMeasure, tuple[int, ...]]] = []
-
-        # Ancillary Variables
         self._ancillary_variables_and_dims: list[
             tuple[AncillaryVariable, tuple[int, ...]]
         ] = []
 
-        identities = set()
         if dim_coords_and_dims:
+            identities = set()
             dims = set()
             for coord, dim in dim_coords_and_dims:
-                identity = coord.standard_name, coord.long_name
+                identity = (coord.standard_name, coord.long_name)
                 if identity not in identities and dim not in dims:
                     self._add_unique_dim_coord(coord, dim)
+                    identities.add(identity)
+                    dims.add(dim)
                 else:
                     self.add_dim_coord(coord, dim)
-                identities.add(identity)
-                dims.add(dim)
+                    identities.add(identity)
+                    dims.add(dim)
 
         if aux_coords_and_dims:
+            identities = set()
             for auxcoord, auxdims in aux_coords_and_dims:
-                identity = auxcoord.standard_name, auxcoord.long_name
+                identity = (auxcoord.standard_name, auxcoord.long_name)
                 if identity not in identities:
                     self._add_unique_aux_coord(auxcoord, auxdims)
+                    identities.add(identity)
                 else:
                     self.add_aux_coord(auxcoord, auxdims)
-                identities.add(identity)
+                    identities.add(identity)
 
         if aux_factories:
             for factory in aux_factories:
@@ -1436,26 +1419,26 @@ class Cube(CFVariableMixin):
             additional logic that is beyond the scope of this method.
 
         """
-        compatible = (
-            self.name() == other.name()
-            and self.units == other.units
-            and self.cell_methods == other.cell_methods
-        )
+        if (
+            self.name() != other.name()
+            or self.units != other.units
+            or self.cell_methods != other.cell_methods
+        ):
+            return False
 
-        if compatible:
-            common_keys = set(self.attributes).intersection(other.attributes)
-            if ignore is not None:
-                if isinstance(ignore, str):
-                    ignore = (ignore,)
+        common_keys = set(self.attributes).intersection(other.attributes)
+        if ignore is not None:
+            if isinstance(ignore, str):
+                common_keys = common_keys.difference((ignore,))
+            else:
                 common_keys = common_keys.difference(ignore)
-            for key in common_keys:
-                if not iris.util._attribute_equal(
-                    self.attributes[key], other.attributes[key]
-                ):
-                    compatible = False
-                    break
+        for key in common_keys:
+            if not iris.util._attribute_equal(
+                self.attributes[key], other.attributes[key]
+            ):
+                return False
 
-        return compatible
+        return True
 
     def convert_units(self, unit: str | Unit) -> None:
         """Change the cube's units, converting the values in the data array.
