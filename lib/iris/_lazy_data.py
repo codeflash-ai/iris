@@ -589,7 +589,8 @@ def lazy_elementwise(lazy_array, elementwise_op):
     # This makes good practical sense for unit conversions, as a Unit.convert
     # call may cast to float, or not, depending on unit equality : Thus, it's
     # much safer to get udunits to decide that for us.
-    dtype = elementwise_op(np.zeros(1, lazy_array.dtype)).dtype
+    zeros1 = np.zeros(1, lazy_array.dtype)
+    dtype = elementwise_op(zeros1).dtype
     meta = da.utils.meta_from_array(lazy_array).astype(dtype)
 
     return da.map_blocks(elementwise_op, lazy_array, dtype=dtype, meta=meta)
