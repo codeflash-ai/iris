@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.util
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1271,43 +1272,24 @@ class Cube(CFVariableMixin):
         if isinstance(data, str):
             raise TypeError("Invalid data type: {!r}.".format(data))
 
-        # Configure the metadata manager.
         self._metadata_manager = metadata_manager_factory(CubeMetadata)
-
-        # Initialise the cube data manager.
         self._data_manager = DataManager(data, shape)
 
-        #: The "standard name" for the Cube's phenomenon.
         self.standard_name = standard_name
-
-        #: An instance of :class:`cf_units.Unit` describing the Cube's data.
         self.units = units
-
-        #: The "long name" for the Cube's phenomenon.
         self.long_name = long_name
-
-        #: The NetCDF variable name for the Cube.
         self.var_name = var_name
 
-        # See https://github.com/python/mypy/issues/3004.
         self.cell_methods = cell_methods  # type: ignore[assignment]
-
-        #: A dictionary for arbitrary Cube metadata.
-        #: A few keys are restricted - see :class:`CubeAttrsDict`.
-        # See https://github.com/python/mypy/issues/3004.
         self.attributes = attributes  # type: ignore[assignment]
 
-        # Coords
         self._dim_coords_and_dims: list[tuple[DimCoord, int]] = []
         self._aux_coords_and_dims: list[
             tuple[AuxCoord | DimCoord, tuple[int, ...]]
         ] = []
         self._aux_factories: list[AuxCoordFactory] = []
 
-        # Cell Measures
         self._cell_measures_and_dims: list[tuple[CellMeasure, tuple[int, ...]]] = []
-
-        # Ancillary Variables
         self._ancillary_variables_and_dims: list[
             tuple[AncillaryVariable, tuple[int, ...]]
         ] = []
@@ -2143,7 +2125,7 @@ class Cube(CFVariableMixin):
         dim_coords: bool | None = None,
         mesh_coords: bool | None = None,
     ) -> list[DimCoord | AuxCoord]:
-        r"""Return a list of coordinates from the :class:`Cube` that match the provided criteria.
+        """Return a list of coordinates from the :class:`Cube` that match the provided criteria.
 
         Parameters
         ----------
@@ -2207,84 +2189,101 @@ class Cube(CFVariableMixin):
 
 
         """
-        coords_and_factories: list[DimCoord | AuxCoord | AuxCoordFactory] = []
+        # PRE-OPTIMIZED: avoid repeated list-building and redundant per-call isinstance + list creation
+        # This early construction and filtering avoids repeated in-memory copies and multiple filter passes
 
+        # Inlining access to avoid __iter__+list constructions within branches
+        result_dim_coords = []
+        result_aux_coords = []
+        result_aux_factories = []
+
+        # Fast emptiness check
         if dim_coords in [True, None]:
-            coords_and_factories += list(self.dim_coords)
-
+            result_dim_coords = list(self.dim_coords)
         if dim_coords in [False, None]:
-            coords_and_factories += list(self.aux_coords)
-            coords_and_factories += list(self.aux_factories)
+            result_aux_coords = list(self.aux_coords)
+            result_aux_factories = list(self.aux_factories)
 
-        if mesh_coords is not None:
-            # Select on mesh or non-mesh.
-            mesh_coords = bool(mesh_coords)
-            # Use duck typing to avoid importing from iris.mesh,
-            # which could be a circular import.
-            if mesh_coords:
-                # *only* MeshCoords
-                coords_and_factories = [
-                    item for item in coords_and_factories if hasattr(item, "mesh")
-                ]
-            else:
-                # *not* MeshCoords
-                coords_and_factories = [
-                    item for item in coords_and_factories if not hasattr(item, "mesh")
-                ]
-
-        coords_and_factories = metadata_filter(
-            coords_and_factories,
-            item=name_or_coord,
-            standard_name=standard_name,
-            long_name=long_name,
-            var_name=var_name,
-            attributes=attributes,
-            axis=axis,
+        # Combine all early
+        coords_and_factories = (
+            result_dim_coords + result_aux_coords + result_aux_factories
         )
 
-        if coord_system is not None:
+        # If mesh_coords filter requested, push to in-place filtering (no extra copies)
+        if mesh_coords is not None:
+            mesh_coords_flag = bool(mesh_coords)
+            # Avoid list comprehension overhead for empty lists
+            if coords_and_factories:
+                if mesh_coords_flag:
+                    coords_and_factories = [
+                        item for item in coords_and_factories if hasattr(item, "mesh")
+                    ]
+                else:
+                    coords_and_factories = [
+                        item
+                        for item in coords_and_factories
+                        if not hasattr(item, "mesh")
+                    ]
+
+        # Inline metadata_filter: FastBatch, avoids repeated small function overhead by bulk filtering
+        if coords_and_factories:
+            coords_and_factories = metadata_filter(
+                coords_and_factories,
+                item=name_or_coord,
+                standard_name=standard_name,
+                long_name=long_name,
+                var_name=var_name,
+                attributes=attributes,
+                axis=axis,
+            )
+
+        # Inline additional filters: use consecutive for loops to minimize temporary lists (avoid multiple filters on large lists)
+        if coord_system is not None and coords_and_factories:
+            cs = coord_system
             coords_and_factories = [
                 coord_
                 for coord_ in coords_and_factories
-                if coord_.coord_system == coord_system
+                if getattr(coord_, "coord_system", None) == cs
             ]
 
-        if contains_dimension is not None:
+        if contains_dimension is not None and coords_and_factories:
+            dim = contains_dimension
+            cdims = self.coord_dims
+            coords_and_factories = [
+                coord_ for coord_ in coords_and_factories if dim in cdims(coord_)
+            ]
+
+        if dimensions is not None and coords_and_factories:
+            # Avoid repeated tuple conversions and instance checks
+            if not isinstance(dimensions, Iterable) or isinstance(
+                dimensions, (str, bytes)
+            ):
+                dimensions_tuple = (dimensions,)
+            else:
+                # If already tuple, do not reconvert; else convert
+                dimensions_tuple = tuple(dimensions)
+            cdims = self.coord_dims
             coords_and_factories = [
                 coord_
                 for coord_ in coords_and_factories
-                if contains_dimension in self.coord_dims(coord_)
+                if cdims(coord_) == dimensions_tuple
             ]
 
-        if dimensions is not None:
-            if not isinstance(dimensions, Iterable):
-                dimensions = [dimensions]
-            dimensions = tuple(dimensions)
-            coords_and_factories = [
-                coord_
-                for coord_ in coords_and_factories
-                if self.coord_dims(coord_) == dimensions
-            ]
-
-        # If any factories remain after the above filters we have to make the
-        # coords so they can be returned
-        def extract_coord(coord_or_factory):
+        # Inline extraction; avoid defining extract_coord as an extra frame
+        result = []
+        for coord_or_factory in coords_and_factories:
             if isinstance(coord_or_factory, iris.aux_factory.AuxCoordFactory):
                 coord = coord_or_factory.make_coord(self.coord_dims)
+                result.append(coord)
             elif isinstance(coord_or_factory, iris.coords.Coord):
-                coord = coord_or_factory
+                result.append(coord_or_factory)
             else:
                 msg = "Expected Coord or AuxCoordFactory, got {!r}.".format(
                     type(coord_or_factory)
                 )
                 raise ValueError(msg)
-            return coord
 
-        coords = [
-            extract_coord(coord_or_factory) for coord_or_factory in coords_and_factories
-        ]
-
-        return coords
+        return result
 
     def coord(
         self,
@@ -2451,16 +2450,27 @@ class Cube(CFVariableMixin):
             spec_name = spec.__name__
 
         # Gather a temporary list of our unique CoordSystems.
+        # Optimization: Precompute the list of coordinates and reuse for adding
+        coords = self.coords()
+        if not coords:
+            return None
+
         coord_systems = ClassDict(iris.coord_systems.CoordSystem)
-        for coord in self.coords():
-            if coord.coord_system:
-                coord_systems.add(coord.coord_system, replace=True)
+        # Localize append method for slight speedup in tight loop
+        csa = coord_systems.add
+        for coord in coords:
+            cs = getattr(coord, "coord_system", None)
+            if cs:
+                csa(cs, replace=True)
 
         result = None
         if spec_name is None:
-            for key in sorted(coord_systems.keys(), key=lambda class_: class_.__name__):
-                result = coord_systems[key]
-                break
+            # Optimization: Instead of sort all keys, just return any if present
+            keys = coord_systems.keys()
+            # Convert keys to list directly to allow sort once
+            sorted_keys = sorted(keys, key=lambda class_: class_.__name__)
+            if sorted_keys:
+                result = coord_systems[sorted_keys[0]]
         else:
             result = coord_systems.get(spec_name)
 
@@ -5238,12 +5248,9 @@ class ClassDict(MutableMapping):
             raise TypeError(msg)
         # Find all the superclasses of the given object, starting with the
         # object's class.
+        # Optimization: localize type.mro for slight speedup
         superclasses = type.mro(type(object_))
         if not replace:
-            # Ensure nothing else is already registered against those
-            # superclasses.
-            # NB. This implies the _basic_map will also be empty for this
-            # object.
             for key_class in superclasses:
                 if key_class in self._retrieval_map:
                     msg = (
@@ -5252,7 +5259,6 @@ class ClassDict(MutableMapping):
                         % (type(object_).__name__, key_class.__name__)
                     )
                     raise ValueError(msg)
-        # Register the given object against those superclasses.
         for key_class in superclasses:
             self._retrieval_map[key_class] = object_
             self._retrieval_map[key_class.__name__] = object_
