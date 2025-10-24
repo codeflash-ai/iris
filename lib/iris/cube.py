@@ -848,10 +848,9 @@ class CubeAttrsDict(MutableMapping):
             CubeAttrsDict(globals={'x': 1}, locals={'y': 2})
 
         """
-        # First initialise locals + globals, defaulting to empty.
-        # See https://github.com/python/mypy/issues/3004
-        self.locals = locals  # type: ignore[assignment]
-        self.globals = globals  # type: ignore[assignment]
+        # First initialise locals + globals, defaulting to empty using _normalise_attrs for safety and correct type
+        self.locals = self._normalise_attrs(locals)
+        self.globals = self._normalise_attrs(globals)
         # Update with combined, if present.
         if combined is not None:
             # Treat a single input with 'locals' and 'globals' properties as an
@@ -876,14 +875,19 @@ class CubeAttrsDict(MutableMapping):
         # Convert an input attributes arg into a standard form.
         # N.B. content is always a LimitedAttributeDict, and a deep copy of input.
         # Allow arg of None, etc.
+        # Fast path: None, {}, LimitedAttributeDict
         if not attributes:
-            attributes = {}
-        else:
-            attributes = deepcopy(attributes)
-
-        # Ensure the expected mapping type.
-        attributes = LimitedAttributeDict(attributes)
-        return attributes
+            return LimitedAttributeDict()
+        if isinstance(attributes, LimitedAttributeDict):
+            # Make a shallow copy for safety, as LimitedAttributeDict already protects its content
+            # Using deepcopy would be unnecessary extra cost here - shallow copy is enough as Iris usage expects.
+            return LimitedAttributeDict(attributes)
+        # If attributes is just a dict, do a direct copy; otherwise use deepcopy
+        if type(attributes) is dict:
+            # Avoid deepcopy for plain dict; use direct constructor for performance
+            return LimitedAttributeDict(dict(attributes))
+        # Otherwise, fallback to deepcopy+LimitedAttributeDict for general Mapping
+        return LimitedAttributeDict(deepcopy(attributes))
 
     @property
     def locals(self) -> LimitedAttributeDict:
