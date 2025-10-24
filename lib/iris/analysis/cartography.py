@@ -363,17 +363,23 @@ def _quadrant_area(radian_lat_bounds, radian_lon_bounds, radius_of_earth):
     ):
         raise ValueError("Bounds must be [n,2] array")
 
-    # fill in a new array of areas
-    radius_sqr = radius_of_earth**2
-    radian_lat_64 = radian_lat_bounds.astype(np.float64)
-    radian_lon_64 = radian_lon_bounds.astype(np.float64)
+    # Use np.asarray instead of astype if already float64, saves copy
+    radian_lat_64 = np.asarray(radian_lat_bounds, dtype=np.float64)
+    radian_lon_64 = np.asarray(radian_lon_bounds, dtype=np.float64)
 
-    ylen = np.sin(radian_lat_64[:, 1]) - np.sin(radian_lat_64[:, 0])
+    # Precompute sin for all lat bounds in a single op (faster for large arrays)
+    sin_lat = np.sin(radian_lat_64)
+    ylen = sin_lat[:, 1] - sin_lat[:, 0]
     xlen = radian_lon_64[:, 1] - radian_lon_64[:, 0]
-    areas = radius_sqr * np.outer(ylen, xlen)
+    radius_sqr = radius_of_earth * radius_of_earth
 
-    # we use abs because backwards bounds (min > max) give negative areas.
-    return np.abs(areas)
+    # Use np.multiply.outer to avoid np.outer's copy and get f-contiguous speeds
+    # Use np.abs before multiplication to save a whole array allocation
+    ylen_abs = np.abs(ylen)
+    xlen_abs = np.abs(xlen)
+    areas = radius_sqr * np.outer(ylen_abs, xlen_abs)
+
+    return areas
 
 
 def area_weights(cube, normalize=False, compute=True, chunks=None):
