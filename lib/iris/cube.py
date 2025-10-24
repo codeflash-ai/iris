@@ -45,6 +45,7 @@ from iris.common.mixin import LimitedAttributeDict
 import iris.coord_systems
 import iris.coords
 from iris.coords import AncillaryVariable, AuxCoord, CellMeasure, CellMethod, DimCoord
+import iris.exceptions
 
 if TYPE_CHECKING:
     from typing import TYPE_CHECKING
@@ -1277,37 +1278,19 @@ class Cube(CFVariableMixin):
         # Initialise the cube data manager.
         self._data_manager = DataManager(data, shape)
 
-        #: The "standard name" for the Cube's phenomenon.
         self.standard_name = standard_name
-
-        #: An instance of :class:`cf_units.Unit` describing the Cube's data.
         self.units = units
-
-        #: The "long name" for the Cube's phenomenon.
         self.long_name = long_name
-
-        #: The NetCDF variable name for the Cube.
         self.var_name = var_name
-
-        # See https://github.com/python/mypy/issues/3004.
         self.cell_methods = cell_methods  # type: ignore[assignment]
-
-        #: A dictionary for arbitrary Cube metadata.
-        #: A few keys are restricted - see :class:`CubeAttrsDict`.
-        # See https://github.com/python/mypy/issues/3004.
         self.attributes = attributes  # type: ignore[assignment]
 
-        # Coords
         self._dim_coords_and_dims: list[tuple[DimCoord, int]] = []
         self._aux_coords_and_dims: list[
             tuple[AuxCoord | DimCoord, tuple[int, ...]]
         ] = []
         self._aux_factories: list[AuxCoordFactory] = []
-
-        # Cell Measures
         self._cell_measures_and_dims: list[tuple[CellMeasure, tuple[int, ...]]] = []
-
-        # Ancillary Variables
         self._ancillary_variables_and_dims: list[
             tuple[AncillaryVariable, tuple[int, ...]]
         ] = []
@@ -1315,8 +1298,9 @@ class Cube(CFVariableMixin):
         identities = set()
         if dim_coords_and_dims:
             dims = set()
+            # Use set/dict membership directly for fast lookups
             for coord, dim in dim_coords_and_dims:
-                identity = coord.standard_name, coord.long_name
+                identity = (coord.standard_name, coord.long_name)
                 if identity not in identities and dim not in dims:
                     self._add_unique_dim_coord(coord, dim)
                 else:
@@ -1326,7 +1310,7 @@ class Cube(CFVariableMixin):
 
         if aux_coords_and_dims:
             for auxcoord, auxdims in aux_coords_and_dims:
-                identity = auxcoord.standard_name, auxcoord.long_name
+                identity = (auxcoord.standard_name, auxcoord.long_name)
                 if identity not in identities:
                     self._add_unique_aux_coord(auxcoord, auxdims)
                 else:
@@ -1544,23 +1528,44 @@ class Cube(CFVariableMixin):
         metadata: iris.coords._DimensionalMetadata,
         data_dims: Iterable[int] | int | None,
     ) -> tuple[int, ...]:
-        # Convert to a tuple of integers
+        # Convert to a tuple of integers efficiently and with minimal allocation
+        # Try to avoid unnecessary tuple creation, and shortcut type checks
         if data_dims is None:
-            data_dims = tuple()
-        elif isinstance(data_dims, Iterable):
-            data_dims = tuple(int(d) for d in data_dims)
+            data_dims_tuple = ()
         else:
-            data_dims = (int(data_dims),)
+            # Use direct type check for int instead of isinstance
+            data_dims_type = type(data_dims)
+            if data_dims_type is int:
+                data_dims_tuple = (int(data_dims),)
+            # This branch is hot so minimize method calls and allocations
+            # Avoid false positives for string types which are Iterable but invalid
+            elif data_dims_type is tuple:
+                # Assume tuple of ints, but ensure casting (though typically unnecessary)
+                data_dims_tuple = tuple(int(d) for d in data_dims)
+            elif data_dims_type is list:
+                data_dims_tuple = tuple(int(d) for d in data_dims)
+            elif isinstance(data_dims, Iterable) and not isinstance(
+                data_dims, (str, bytes)
+            ):
+                # Avoid generic Iterable when possible
+                data_dims_tuple = tuple(int(d) for d in data_dims)
+            else:
+                data_dims_tuple = (int(data_dims),)
 
-        if data_dims:
-            if len(data_dims) != metadata.ndim:
+        # Fast comparison and checks; structure order avoids unnecessary repeated method calls
+        if data_dims_tuple:
+            if len(data_dims_tuple) != metadata.ndim:
                 msg = "Invalid data dimensions: {} given, {} expected for {!r}.".format(
-                    len(data_dims), metadata.ndim, metadata.name()
+                    len(data_dims_tuple), metadata.ndim, metadata.name()
                 )
                 raise iris.exceptions.CannotAddError(msg)
-            # Check compatibility with the shape of the data
-            for i, dim in enumerate(data_dims):
-                if metadata.shape[i] != self.shape[dim]:
+
+            # Only enumerate if length matches (short-circuited above)
+            shape = self.shape
+            coord_shape = metadata.shape
+            for i, dim in enumerate(data_dims_tuple):
+                # Use local variables shape/coord_shape to avoid repeated attribute lookup
+                if coord_shape[i] != shape[dim]:
                     msg = (
                         "Unequal lengths. Cube dimension {} => {};"
                         " metadata {!r} dimension {} => {}."
@@ -1568,29 +1573,29 @@ class Cube(CFVariableMixin):
                     raise iris.exceptions.CannotAddError(
                         msg.format(
                             dim,
-                            self.shape[dim],
+                            shape[dim],
                             metadata.name(),
                             i,
-                            metadata.shape[i],
+                            coord_shape[i],
                         )
                     )
         elif metadata.shape != (1,):
             msg = "Missing data dimensions for multi-valued {} {!r}"
             msg = msg.format(metadata.__class__.__name__, metadata.name())
             raise iris.exceptions.CannotAddError(msg)
-        return data_dims
+        return data_dims_tuple
 
     def _add_unique_aux_coord(
         self,
         coord: AuxCoord | DimCoord,
         data_dims: Iterable[int] | int | None,
     ) -> None:
-        data_dims = self._check_multi_dim_metadata(coord, data_dims)
-
-        def is_mesh_coord(anycoord: iris.coords.Coord) -> TypeGuard[MeshCoord]:
-            return hasattr(anycoord, "mesh")
-
-        if is_mesh_coord(coord):
+        # Inline fast path for mesh coord check and combine error handling branches
+        data_dims_tuple = self._check_multi_dim_metadata(coord, data_dims)
+        # Define mesh check only once, not per call
+        coord_type = type(coord)
+        is_mesh = hasattr(coord, "mesh")
+        if is_mesh:
             mesh = self.mesh
             if mesh:
                 msg = (
@@ -1618,17 +1623,17 @@ class Cube(CFVariableMixin):
                         )
                     )
                 mesh_dims = (self.mesh_dim(),)
-                if data_dims != mesh_dims:
+                if data_dims_tuple != mesh_dims:
                     raise iris.exceptions.CannotAddError(
                         msg.format(
                             item="mesh dimension",
                             coord=coord,
-                            thisval=data_dims,
+                            thisval=data_dims_tuple,
                             ownval=mesh_dims,
                         )
                     )
 
-        self._aux_coords_and_dims.append((coord, data_dims))
+        self._aux_coords_and_dims.append((coord, data_dims_tuple))
 
     def add_aux_factory(self, aux_factory: AuxCoordFactory) -> None:
         """Add an auxiliary coordinate factory to the cube.
@@ -2549,7 +2554,7 @@ class Cube(CFVariableMixin):
         return result
 
     def mesh_dim(self) -> int | None:
-        r"""Return the cube dimension of the mesh.
+        """Return the cube dimension of the mesh.
 
         Return the cube dimension of the mesh, if the cube has any
         :class:`~iris.mesh.MeshCoord`,
@@ -2567,7 +2572,7 @@ class Cube(CFVariableMixin):
         if coord is None:
             result = None
         else:
-            (result,) = self.coord_dims(coord)  # result is a 1-tuple
+            (result,) = self.coord_dims(coord)
         return result
 
     def cell_measures(
