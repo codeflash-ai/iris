@@ -1157,30 +1157,36 @@ class Cube(CFVariableMixin):
             # we don't want to copy the children here, so take a shallow copy
             new_node = node.cloneNode(deep=False)
 
-            # Versions of python <3.8 order attributes in alphabetical order.
-            # Python >=3.8 order attributes in insert order.  For consistent behaviour
-            # across both, we'll go with alphabetical order always.
-            # Remove all the attribute nodes, then add back in alphabetical order.
-            attrs = [
-                new_node.getAttributeNode(attr_name).cloneNode(deep=True)
-                for attr_name in sorted(node.attributes.keys())
-            ]
-            for attr in attrs:
-                new_node.removeAttributeNode(attr)
-            for attr in attrs:
-                new_node.setAttributeNode(attr)
+            # Remove and reset attribute nodes, sorted alphabetically.
+            # Optimization: get the keys as a sorted list once, and use them directly.
+            node_attrs = node.attributes
+            if node_attrs and node_attrs.length:
+                # Gather attribute nodes as a list.
+                sorted_names = sorted(node_attrs.keys())
+                attrs = [
+                    node_attrs.get(attr_name).cloneNode(deep=True)
+                    for attr_name in sorted_names
+                ]
+                # Remove all attributes at once before setting them back.
+                for attr_name in sorted_names:
+                    # Only remove if present, node might have lost attribute by cloning in some DOM implementations
+                    old_attr = new_node.getAttributeNode(attr_name)
+                    if old_attr is not None:
+                        new_node.removeAttributeNode(old_attr)
+                for attr in attrs:
+                    new_node.setAttributeNode(attr)
 
+            # Avoid unnecessary child node copying
             if node.childNodes:
-                children = [_walk_nodes(x) for x in node.childNodes]
+                # Preallocate list for performance.
+                children = [_walk_nodes(child) for child in node.childNodes]
                 for c in children:
                     new_node.appendChild(c)
-
             return new_node
 
         nodes = _walk_nodes(doc.documentElement)
         new_doc = Document()
         new_doc.appendChild(nodes)
-
         return new_doc
 
     def __init__(
