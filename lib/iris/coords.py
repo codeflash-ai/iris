@@ -1359,12 +1359,14 @@ class Cell(namedtuple("Cell", ["point", "bound"])):
         if np.ma.is_masked(point):
             # `np.ma.masked` is unhashable
             point = Cell._MASKED_VALUE_HASH
-        if self.bound is None:
-            return hash(point)
         bound = self.bound
-        rbound = bound[::-1]
-        if rbound < bound:
-            bound = rbound
+        if bound is None:
+            return hash(point)
+        # Fast path: avoid creating reversed tuple unless necessary
+        # Only reverse if bound[1] < bound[0], otherwise use original tuple
+        # This leverages tuple comparison ordering, but avoids slicing for most inputs
+        if bound[1] < bound[0]:
+            bound = (bound[1], bound[0])
         return hash((point, bound))
 
     def __eq__(self, other):
