@@ -157,18 +157,14 @@ class UkmoProcessFlagsHandler(AttributeHandler):
         # In this case the attribute name does not matter.
         attr_value = str(attr_value)
 
-        def value_unfix(value):
-            value = value.replace("_", " ")
-            if value == "<EMPTY>":
-                # A special placeholder flagging where the original was an empty string.
-                value = ""
-            return value
-
         if attr_value == "":
             # This is basically a fix for the odd behaviour of 'str.split'.
             flags = []
         else:
-            flags = [value_unfix(x) for x in attr_value.split(" ")]
+            flags = [
+                "" if x == "<EMPTY>" else x.replace("_", " ")
+                for x in attr_value.split(" ")
+            ]
 
         return tuple(flags)
 
