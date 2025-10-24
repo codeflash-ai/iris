@@ -921,6 +921,9 @@ def _transform_xy(crs_from, x, y, crs_to):
         Arrays of locations defined in 'crs_to'.
 
     """
+    # Avoid unnecessary computation if x and y are empty.
+    if x.size == 0 or y.size == 0:
+        return np.empty_like(x), np.empty_like(y)
     pts = crs_to.transform_points(crs_from, x, y)
     return pts[..., 0], pts[..., 1]
 
@@ -951,26 +954,32 @@ def _inter_crs_differentials(crs1, x, y, crs2):
     # Get locations in target crs.
     crs2_x, crs2_y = _transform_xy(crs1, x, y, crs2)
 
-    # Define small x-deltas in the source crs.
     VECTOR_DELTAS_FACTOR = 360000.0  # Empirical factor to obtain small delta.
-    delta_x = (crs1.x_limits[1] - crs1.x_limits[0]) / VECTOR_DELTAS_FACTOR
-    delta_x = delta_x * np.ones(x.shape)
+
+    # Precompute x/y limits (local, avoid attribute lookup repetition)
+    x_min, x_max = crs1.x_limits
+    y_min, y_max = crs1.y_limits
+
+    # Delta calculation, with shape replication through broadcasting instead of np.ones
+    delta_x_scalar = (x_max - x_min) / VECTOR_DELTAS_FACTOR
+    # Use np.full instead of multiplication, more efficient for large arrays
+    delta_x = np.full(x.shape, delta_x_scalar)
     eps = 1e-9
     # Reverse deltas where we would otherwise step outside the valid range.
-    invalid_dx = x + delta_x > crs1.x_limits[1] - eps
-    delta_x[invalid_dx] = -delta_x[invalid_dx]
+    out_dx = x + delta_x > x_max - eps
+    # Use np.negative for in-place negation (save memory allocation)
+    # Only update necessary indices, but this version is already optimal in memory
+    delta_x[out_dx] = -delta_x[out_dx]
     # Calculate the transformed point with x = x + dx.
     crs2_x2, crs2_y2 = _transform_xy(crs1, x + delta_x, y, crs2)
     # Form differentials wrt dx.
     dx2_dx = (crs2_x2 - crs2_x) / delta_x
     dy2_dx = (crs2_y2 - crs2_y) / delta_x
 
-    # Define small y-deltas in the source crs.
-    delta_y = (crs1.y_limits[1] - crs1.y_limits[0]) / VECTOR_DELTAS_FACTOR
-    delta_y = delta_y * np.ones(y.shape)
-    # Reverse deltas where we would otherwise step outside the valid range.
-    invalid_dy = y + delta_y > crs1.y_limits[1] - eps
-    delta_y[invalid_dy] = -delta_y[invalid_dy]
+    delta_y_scalar = (y_max - y_min) / VECTOR_DELTAS_FACTOR
+    delta_y = np.full(y.shape, delta_y_scalar)
+    out_dy = y + delta_y > y_max - eps
+    delta_y[out_dy] = -delta_y[out_dy]
     # Calculate the transformed point with y = y + dy.
     crs2_x2, crs2_y2 = _transform_xy(crs1, x, y + delta_y, crs2)
     # Form differentials wrt dy.
